@@ -6,3 +6,4 @@ open_clip/*
 dsconfig/*
 .vscode/*
 dsconfig/*
+model.pt

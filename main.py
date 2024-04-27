@@ -11,7 +11,7 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import collections
 
-from data.datasets import *
+# from data.datasets import *
 # from data.datasets import customized_collate_fn
 
 from utils import utils
@@ -27,6 +27,11 @@ from datetime import datetime
 
 import open_clip
 import models.uni3d as models
+import sys
+import os
+import logging
+import numpy as np
+import random
 
 best_acc1 = 0
 
@@ -127,17 +132,20 @@ def main(args):
 
     random_seed(args.seed, 0)
 
-    logging.info("=> create clip teacher...")
-    # It is recommended to download clip model in advance and then load from the local
-    clip_model, _, _ = open_clip.create_model_and_transforms(model_name=args.clip_model, pretrained=args.pretrained) 
-    clip_model.to(device)
+    # logging.info("=> create clip teacher...")
+    # # It is recommended to download clip model in advance and then load from the local
+    # clip_model, _, _ = open_clip.create_model_and_transforms(model_name=args.clip_model, pretrained=args.pretrained)
+    # clip_model.to(device)
 
     # create model
     logging.info("=> creating model: {}".format(args.model))
     model = getattr(models, args.model)(args=args)
     model.to(device)
     model_without_ddp = model
-    
+
+    extract_3d_feat(args, model)
+    return
+
     # evaluate model
     if args.evaluate_3d:
         logging.info("=> evaluating...")
@@ -599,6 +607,135 @@ def test_zeroshot_3d_core(test_loader, validate_dataset_name, model, clip_model,
     progress.synchronize()
     logging.info('0-shot * Acc@1 {top1.avg:.3f} Acc@3 {top3.avg:.3f} Acc@5 {top5.avg:.3f}')
     return {'acc1': top1.avg, 'acc3': top3.avg, 'acc5': top5.avg}
+
+def extract_3d_feat(args, model):
+    checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+    logging.info('loaded checkpoint {}'.format(args.ckpt_path))
+    sd = checkpoint['module']
+    if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+        sd = {k[len('module.'):]: v for k, v in sd.items()}
+    model.load_state_dict(sd)
+    model.eval()
+
+    data_dir = "/mnt/petrelfs/share_data/huanghaifeng/data/processed/scannet/mask3d_ins_data/pcd_all"
+    import glob
+    from tqdm import tqdm
+    import os
+
+    scan_ids = [x.split('.')[0] for x in os.listdir(data_dir)]
+    scan_ids.sort()
+
+    outputs = {}
+    for scan_id in tqdm(scan_ids):
+        points, colors, instance_class_labels, instance_segids = torch.load(
+            os.path.join(data_dir, f"{scan_id}.pth")
+        )
+        num_insts = len(instance_class_labels)
+        for i in range(num_insts):
+            inst_mask = instance_segids[i]
+            pc = points[inst_mask]
+            if len(pc) < 10:
+                print(scan_id, i, "empty bbox")
+                continue
+            rgb = colors[inst_mask] / 255.
+            centroid = np.mean(pc, axis=0)
+            pc = pc - centroid
+            m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+            pc = pc / m
+            pc = torch.tensor(pc).to(args.device)
+            rgb = torch.tensor(rgb).to(args.device)
+            input = torch.cat([pc, rgb], dim=-1).unsqueeze(0)
+            while input.shape[1] < 64:
+                input = torch.cat([input, input], dim=1)
+            pc_feature = utils.get_model(model).encode_pc(input)
+            # pc_feature = pc_feature / pc_feature.norm(dim=-1, keepdim=True)
+            outputs[f"{scan_id}_{i:02}"] = pc_feature.squeeze(0).detach().cpu()
+
+    torch.save(outputs, "scannet_mask3d_uni3d_feats.pt")
+
+# def extract_3d_feat(args, model):
+#     checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+#     logging.info('loaded checkpoint {}'.format(args.ckpt_path))
+#     sd = checkpoint['module']
+#     if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+#         sd = {k[len('module.'):]: v for k, v in sd.items()}
+#     model.load_state_dict(sd)
+#     model.eval()
+
+#     data_dir = "/mnt/petrelfs/share_data/huanghaifeng/data/processed/scannet/mask3d_ins_data/pcd_with_global_alignment"
+#     import glob
+#     from tqdm import tqdm
+#     import os
+
+#     scan_ids = [x.split('.')[0] for x in os.listdir(data_dir)]
+#     scan_ids.sort()
+
+#     outputs = {}
+#     for scan_id in tqdm(scan_ids):
+#         points, colors, _, inst_labels = torch.load(
+#             os.path.join(data_dir, f"{scan_id}.pth")
+#         )
+#         if inst_labels is None:
+#             continue
+#         num_insts = inst_labels.max()
+#         for i in range(num_insts+1):
+#             inst_mask = inst_labels == i
+#             pc = points[inst_mask]
+#             if len(pc) < 10:
+#                 print(scan_id, i, "empty bbox")
+#                 continue
+#             rgb = colors[inst_mask] / 255.
+#             centroid = np.mean(pc, axis=0)
+#             pc = pc - centroid
+#             m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+#             pc = pc / m
+#             pc = torch.tensor(pc).to(args.device)
+#             rgb = torch.tensor(rgb).to(args.device)
+#             input = torch.cat([pc, rgb], dim=-1).unsqueeze(0)
+#             while input.shape[1] < 64:
+#                 input = torch.cat([input, input], dim=1)
+#             pc_feature = utils.get_model(model).encode_pc(input)
+#             # pc_feature = pc_feature / pc_feature.norm(dim=-1, keepdim=True)
+#             outputs[f"{scan_id}_{i:02}"] = pc_feature.squeeze(0).detach().cpu()
+
+#     torch.save(outputs, "scannet_mask3d_uni3d_feats.pt")
+
+
+# def extract_cap3d_feat(args, model):
+#     checkpoint = torch.load(args.ckpt_path, map_location='cpu')
+#     logging.info('loaded checkpoint {}'.format(args.ckpt_path))
+#     sd = checkpoint['module']
+#     if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
+#         sd = {k[len('module.'):]: v for k, v in sd.items()}
+#     model.load_state_dict(sd)
+#     model.eval()
+
+#     # data_dir = "/root/scene-LLaMA/datasets/referit3d/pointgroup_ins_data/pcd_with_global_alignment"
+#     data_dir = '/mnt/petrelfs/share_data/huanghaifeng/data/cap3d/8192_npy'
+#     from tqdm import tqdm
+
+#     # scan_ids = [x.split('.')[0] for x in os.listdir(data_dir)]
+#     # scan_ids.sort()
+
+#     outputs = {}
+#     for file_name in tqdm(os.listdir(data_dir)):
+#         obj_id = file_name.split('_8192')[0]
+#         file_path = os.path.join(data_dir, file_name)
+#         tmp = np.load(file_path)
+#         pc = tmp[:, :3]
+#         rgb = tmp[:, 3:]
+#         centroid = np.mean(pc, axis=0)
+#         pc = pc - centroid
+#         m = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
+#         pc = pc / m
+#         pc = torch.tensor(pc).to(args.device)
+#         rgb = torch.tensor(rgb).to(args.device)
+#         input = torch.cat([pc, rgb], dim=-1).unsqueeze(0)
+#         pc_feature = utils.get_model(model).encode_pc(input)
+#         outputs[obj_id] = pc_feature.squeeze(0).detach().cpu()
+
+#     torch.save(outputs, "objaverse_uni3d_feature.pt")
+
 
 def test_zeroshot_3d(args, model, clip_model):
     checkpoint = torch.load(args.ckpt_path, map_location='cpu')

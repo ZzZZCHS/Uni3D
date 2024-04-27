@@ -9,7 +9,7 @@ import torch.autograd as autograd
 from PIL import ImageFilter
 from easydict import EasyDict
 import yaml
-from data.datasets import Dataset_3D
+# from data.datasets import Dataset_3D
 
 def merge_new_config(config, new_config):
     for key, val in new_config.items():
